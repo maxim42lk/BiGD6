@@ -1,0 +1,75 @@
+# kubernetes/spark-app.yaml
+apiVersion: sparkoperator.k8s.io/v1beta2
+kind: SparkApplication
+metadata:
+  name: hospital-readmissions-analysis
+  namespace: default
+spec:
+  type: Python
+  mode: cluster
+  image: "spark-hospital:latest"
+  imagePullPolicy: Always
+  sparkVersion: "3.3.0"
+  
+  sparkConf:
+    "spark.kubernetes.driver.pod.name": "spark-driver-hospital"
+    "spark.kubernetes.executor.limit.cores": "4"
+    "spark.executor.instances": "10"
+    "spark.executor.memory": "8g"
+    "spark.driver.memory": "4g"
+    "spark.memory.fraction": "0.6"
+    "spark.sql.shuffle.partitions": "200"
+    "spark.dynamicAllocation.enabled": "true"
+    "spark.dynamicAllocation.minExecutors": "5"
+    "spark.dynamicAllocation.maxExecutors": "20"
+    "spark.shuffle.service.enabled": "true"
+    "spark.kubernetes.container.image.pullPolicy": "Always"
+  
+  driver:
+    cores: 2
+    memory: "4g"
+    labels:
+      version: 3.3.0
+    serviceAccount: spark
+    nodeSelector:
+      node.kubernetes.io/instance-type: m5.xlarge
+    tolerations:
+    - key: "on-demand"
+      operator: "Equal"
+      value: "true"
+      effect: "NoSchedule"
+  
+  executor:
+    cores: 4
+    memory: "8g"
+    instances: 10
+    labels:
+      version: 3.3.0
+    nodeSelector:
+      node.kubernetes.io/instance-type: m5.2xlarge
+    tolerations:
+    - key: "spot"
+      operator: "Equal"
+      value: "true"
+      effect: "NoSchedule"
+  
+  mainApplicationFile: "local:///app/src/data_processing.py"
+  arguments:
+    - "--input-path"
+    - "/app/data/hospital_readmissions_30k.csv"
+    - "--output-path"
+    - "/tmp/results"
+  
+  restartPolicy:
+    type: OnFailure
+    onFailureRetries: 3
+    onFailureRetryInterval: 10
+    onSubmissionFailureRetries: 5
+    onSubmissionFailureRetryInterval: 20
+  
+  monitoring:
+    exposeDriverMetrics: true
+    exposeExecutorMetrics: true
+    prometheus:
+      jmxExporterJar: "/prometheus/jmx_prometheus_javaagent-0.16.1.jar"
+      port: 8090
