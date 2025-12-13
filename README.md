@@ -15,7 +15,8 @@ SLA: 99.9% доступности.
 Чтобы запустить проект нужно перейти  в католог и выполнить команду: "docker-compose up"
 
 Страница Grafana:
-<img width="1869" height="908" alt="image" src="https://github.com/user-attachments/assets/ca4fb7cd-862e-4cb8-8a90-b888dff42865" />
+<img width="1856" height="809" alt="image" src="https://github.com/user-attachments/assets/3282b780-5e66-4d68-b79d-345ce49a30a6" />
+
 
 Результат выполнения в логах spark-master:
 ```
@@ -233,7 +234,8 @@ FIRST_YEAR_ROI=-17
 ```
 Вывод:
 
-<img width="508" height="148" alt="image" src="https://github.com/user-attachments/assets/d13dad41-f154-47d4-9997-90529cd7462b" />
+<img width="552" height="265" alt="image" src="https://github.com/user-attachments/assets/68df9a57-882b-4e2a-9282-9b9aa153aac4" />
+
 
 
 
