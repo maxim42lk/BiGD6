@@ -14,6 +14,360 @@ SLA: 99.9% доступности.
 
 Чтобы запустить проект нужно перейти  в католог и выполнить команду: "docker-compose up"
 
+Части кода:
+
+Dockerfile
+```
+FROM ubuntu:22.04
+
+# Установка Java 11 и зависимостей
+RUN apt-get update && apt-get install -y \
+    openjdk-11-jdk-headless \
+    wget \
+    curl \
+    python3 \
+    python3-pip \
+    libsnappy1v5 \
+    libgomp1 \
+    zlib1g \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# Установка Apache Spark
+ARG SPARK_VERSION=3.3.0
+ARG HADOOP_VERSION=3.3.2
+
+# Используем явные переменные для избежания проблем с подстановкой
+RUN SPARK_FILE="spark-${SPARK_VERSION}-bin-hadoop3.tgz" && \
+    wget -q https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/${SPARK_FILE} && \
+    tar xzf ${SPARK_FILE} -C /opt/ && \
+    mv /opt/spark-${SPARK_VERSION}-bin-hadoop3 /opt/spark && \
+    rm ${SPARK_FILE}
+
+# Установка Python зависимостей
+COPY requirements.txt /tmp/requirements.txt
+RUN pip3 install --no-cache-dir -r /tmp/requirements.txt
+
+# Настройка переменных окружения
+ENV JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
+ENV SPARK_HOME=/opt/spark
+ENV PATH=$PATH:$SPARK_HOME/bin:$SPARK_HOME/sbin
+ENV PYSPARK_PYTHON=python3
+ENV PYSPARK_DRIVER_PYTHON=python3
+
+# Оптимизация для контейнеров
+ENV JAVA_OPTS="-XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0"
+
+# Создание рабочей директории
+WORKDIR /app
+
+COPY src/ /app/src/
+COPY data/ /app/data/
+COPY tests/ /app/tests/
+
+# Экспорт портов
+EXPOSE 8080 7077 4040
+```
+docker-compose.yml:
+```
+# docker-compose.yml
+version: '3.8'
+
+services:
+  spark-master:
+    build: .
+    container_name: spark-master
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+    environment:
+      - SPARK_MODE=master
+    volumes:
+      - ./data:/app/data:ro
+      - ./src:/app/src:ro
+      - spark-data:/tmp/spark
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+
+  spark-worker:
+    build: .
+    container_name: spark-worker
+    depends_on:
+      - spark-master
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - SPARK_WORKER_CORES=2
+      - SPARK_WORKER_MEMORY=4g
+    volumes:
+      - ./data:/app/data:ro
+      - ./src:/app/src:ro
+      - spark-data:/tmp/spark
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+
+  jupyter:
+    image: jupyter/pyspark-notebook:latest
+    container_name: jupyter
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./data:/home/jovyan/data:ro
+      - ./src:/home/jovyan/src:ro
+    environment:
+      - JUPYTER_ENABLE_LAB=yes
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    depends_on:
+      - prometheus
+
+volumes:
+  spark-data:
+```
+
+spark-operator.yaml:
+```
+# kubernetes/spark-app.yaml
+apiVersion: sparkoperator.k8s.io/v1beta2
+kind: SparkApplication
+metadata:
+  name: hospital-readmissions-analysis
+  namespace: default
+spec:
+  type: Python
+  mode: cluster
+  image: "spark-hospital:latest"
+  imagePullPolicy: Always
+  sparkVersion: "3.3.0"
+  
+  sparkConf:
+    "spark.kubernetes.driver.pod.name": "spark-driver-hospital"
+    "spark.kubernetes.executor.limit.cores": "4"
+    "spark.executor.instances": "10"
+    "spark.executor.memory": "8g"
+    "spark.driver.memory": "4g"
+    "spark.memory.fraction": "0.6"
+    "spark.sql.shuffle.partitions": "200"
+    "spark.dynamicAllocation.enabled": "true"
+    "spark.dynamicAllocation.minExecutors": "5"
+    "spark.dynamicAllocation.maxExecutors": "20"
+    "spark.shuffle.service.enabled": "true"
+    "spark.kubernetes.container.image.pullPolicy": "Always"
+  
+  driver:
+    cores: 2
+    memory: "4g"
+    labels:
+      version: 3.3.0
+    serviceAccount: spark
+    nodeSelector:
+      node.kubernetes.io/instance-type: m5.xlarge
+    tolerations:
+    - key: "on-demand"
+      operator: "Equal"
+      value: "true"
+      effect: "NoSchedule"
+  
+  executor:
+    cores: 4
+    memory: "8g"
+    instances: 10
+    labels:
+      version: 3.3.0
+    nodeSelector:
+      node.kubernetes.io/instance-type: m5.2xlarge
+    tolerations:
+    - key: "spot"
+      operator: "Equal"
+      value: "true"
+      effect: "NoSchedule"
+  
+  mainApplicationFile: "local:///app/src/data_processing.py"
+  arguments:
+    - "--input-path"
+    - "/app/data/hospital_readmissions_30k.csv"
+    - "--output-path"
+    - "/tmp/results"
+  
+  restartPolicy:
+    type: OnFailure
+    onFailureRetries: 3
+    onFailureRetryInterval: 10
+    onSubmissionFailureRetries: 5
+    onSubmissionFailureRetryInterval: 20
+  
+  monitoring:
+    exposeDriverMetrics: true
+    exposeExecutorMetrics: true
+    prometheus:
+      jmxExporterJar: "/prometheus/jmx_prometheus_javaagent-0.16.1.jar"
+      port: 8090
+```
+
+YARN
+```
+<property>
+  <name>yarn.scheduler.capacity.root.queues</name>
+  <value>default,etl,ml</value>
+</property>
+<property>
+  <name>yarn.scheduler.capacity.root.etl.capacity</name>
+  <value>60</value>
+</property>
+<property>
+  <name>yarn.scheduler.capacity.root.ml.capacity</name>
+  <value>30</value>
+</property>
+<property>
+  <name>yarn.scheduler.capacity.root.default.capacity</name>
+  <value>10</value>
+</property>
+```
+KEDA autoscaling:
+```
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: spark-scaledobject
+spec:
+  scaleTargetRef:
+    apiVersion: sparkoperator.k8s.io/v1beta2
+    kind: SparkApplication
+    name: fraud-detection
+  triggers:
+  - type: kafka
+    metadata:
+      bootstrapServers: kafka:9092
+      consumerGroup: spark-group
+      topic: transactions
+      lagThreshold: "1000"
+      activationLagThreshold: "100"
+```
+Prometheus алерты:
+```
+groups:
+  - name: spark
+    rules:
+    - alert: HighShuffleSpill
+      expr: spark_shuffle_spill_memory > 1000000000
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        summary: "Высокий spill в Spark shuffle"
+        description: "Spill превысил 1 ГБ в течение 10 минут"
+    
+    - alert: HighDataDrift
+      expr: data_drift_score > 0.2
+      for: 5m
+      labels:
+        severity: critical
+      annotations:
+        summary: "Высокий data drift"
+        description: "Data drift score {{ $value }} > 0.2"
+```
+Генератор нагрузки
+```
+class TransactionGenerator:
+    """Генератор реалистичных транзакций для fraud detection"""
+    
+    def __init__(self, target_endpoint: str = "http://localhost:8080/process"):
+        self.target_endpoint = target_endpoint
+        self.running = False
+        self.stats = {
+            'total_sent': 0,
+            'total_fraud': 0,
+            'latencies': deque(maxlen=10000),
+            'errors': 0,
+            'start_time': None,
+            'throughput_history': deque(maxlen=60)
+        }
+def generate_transaction(self, transaction_id: int) -> Dict:
+    """Генерация одной транзакции с признаками для fraud detection"""
+    
+    # Определение, будет ли транзакция мошеннической
+    base_fraud_probability = {
+        'LOW': 0.001,    # 0.1%
+        'MEDIUM': 0.01,  # 1%
+        'HIGH': 0.1,     # 10%
+        'CRITICAL': 0.5  # 50%
+    }.get(user['risk_level'], 0.01)
+    
+    # Генерация суммы транзакции
+    if is_fraud:
+        # Для fraud транзакций: аномальные суммы
+        amount_multiplier = random.choice([0.1, 5.0, 10.0, 100.0])
+        amount = user['avg_transaction_amount'] * amount_multiplier
+    else:
+        # Для нормальных транзакций: вокруг среднего
+        amount = max(1.0, random.gauss(user['avg_transaction_amount'], 
+                                       user['avg_transaction_amount'] * 0.3))
+    
+    transaction = {
+        'transaction_id': f"TXN_{transaction_id:012d}",
+        'timestamp': datetime.now().isoformat(),
+        'user_id': user['user_id'],
+        'amount': round(amount, 2),
+        'merchant_category': merchant_category,
+        
+        # Признаки для fraud detection
+        'device_type': random.choice(user['device_types']),
+        'ip_address': self._generate_ip(user['geography']),
+        'transactions_last_hour': self._calculate_recent_transactions(user['user_id']),
+        'time_since_last_transaction': random.randint(60, 3600),
+        
+        # Флаг для тестирования
+        'is_fraud_actual': is_fraud,
+    }
+    
+    return transaction
+def generate_load(self, tps: int, duration_seconds: int, 
+                 test_scenario: str = "normal"):
+    """
+    Генерация нагрузки с заданным TPS
+    
+    Args:
+        tps: Transactions per second
+        duration_seconds: Длительность теста
+        test_scenario: Сценарий тестирования
+    """
+    
+    self.running = True
+    self.stats['start_time'] = time.time()
+    transaction_id = 0
+    
+    while time.time() - self.stats['start_time'] < duration_seconds:
+        # Контроль TPS
+        current_tps = self._get_current_tps()
+        if current_tps >= tps:
+            time.sleep(0.001)
+            continue
+        
+        # Генерация и отправка транзакции
+        transaction = self.generate_transaction(transaction_id)
+        result = self.send_transaction_sync(transaction)
+        self._process_result(result)
+        
+        transaction_id += 1
+        
+        # Контроль скорости
+        time.sleep(1.0 / tps if tps > 0 else 0.001)
+```
 Страница Grafana:
 <img width="1856" height="809" alt="image" src="https://github.com/user-attachments/assets/3282b780-5e66-4d68-b79d-345ce49a30a6" />
 
